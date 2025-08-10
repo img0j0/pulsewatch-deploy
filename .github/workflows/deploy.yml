@@ -1,0 +1,69 @@
+﻿name: Deploy PulseWatch
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install SSH and rsync
+        run: sudo apt-get update && sudo apt-get install -y openssh-client rsync
+
+      - name: Add droplet host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.DO_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Load SSH key
+        run: |
+          echo "${{ secrets.DO_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+- name: Sync repo to droplet (rsync over SSH)
+        run: |
+          RSYNC_RSH='ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no'
+          rsync -az --delete --exclude ".git" --exclude ".github" ./ "${{ secrets.DO_USER }}@${{ secrets.DO_HOST }}:${{ secrets.DO_APP_DIR }}/"
+
+      - name: Render .env from GitHub Secrets
+        run: |
+          ssh -i ~/.ssh/id_ed25519 ${{ secrets.DO_USER }}@${{ secrets.DO_HOST }} <<'EOSSH'
+          set -euo pipefail
+          cd "${DO_APP_DIR:-/opt/pulsewatch}"
+          cat > .env <<'ENV'
+          FLASK_ENV=production
+          APP_NAME=PulseWatch
+          ADMIN_EMAIL=${ADMIN_EMAIL}
+          SERVER_NAME=${SERVER_NAME}
+          PREFERRED_URL_SCHEME=https
+          SECRET_KEY=${SECRET_KEY}
+          ENV
+          EOSSH
+env:
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          SERVER_NAME: ${{ secrets.SERVER_NAME }}
+          SECRET_KEY: ${{ secrets.SECRET_KEY }}
+
+      - name: Compose up
+        run: |
+          ssh -i ~/.ssh/id_ed25519 ${{ secrets.DO_USER }}@${{ secrets.DO_HOST }} <<'EOSSH'
+          set -euo pipefail
+          cd "${DO_APP_DIR:-/opt/pulsewatch}"
+          docker compose down --remove-orphans
+          docker compose up -d --build
+          docker compose ps
+          EOSSH
+
+      - name: Smoke tests
+        run: |
+          ssh -i ~/.ssh/id_ed25519 ${{ secrets.DO_USER }}@${{ secrets.DO_HOST }} <<'EOSSH'
+          set -euo pipefail
+          cd "${DO_APP_DIR:-/opt/pulsewatch}"
+          docker compose exec -T nginx nginx -t || (docker compose logs --no-color nginx; exit 1)
+          docker compose exec -T nginx nginx -s reload || true
+          curl -fsS -o /dev/null http://127.0.0.1:8000/ || (docker compose logs --no-color web; exit 1)
+          curl -fsS -o /dev/null https://pulsewatch.pro/health || (docker compose logs --no-color nginx; exit 1)
+          EOSSH
