@@ -2,12 +2,18 @@
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
+
+concurrency:
+  group: pulsewatch-deploy
+  cancel-in-progress: true
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -15,19 +21,28 @@ jobs:
       - name: Install rsync
         run: sudo apt-get update && sudo apt-get install -y rsync
 
-      - name: Start SSH agent and add key
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.DO_SSH_KEY }}
-
-      - name: Trust droplet host key
+      - name: Write SSH key & known_hosts
         run: |
           mkdir -p ~/.ssh
+          echo "${{ secrets.DO_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "${{ secrets.DO_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: DEBUG: key works & SSH connectivity
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes -o IdentitiesOnly=yes "${{ secrets.DO_USER }}@${{ secrets.DO_HOST }}" 'echo connected'
+
+      - name: Ensure app dir exists on droplet
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes "${{ secrets.DO_USER }}@${{ secrets.DO_HOST }}" "mkdir -p '${{ secrets.DO_APP_DIR }}'"
 
       - name: Sync repo to droplet (rsync over SSH)
         run: |
-          rsync -az --delete --exclude ".git" --exclude ".github" ./ "${{ secrets.DO_USER }}@${{ secrets.DO_HOST }}:${{ secrets.DO_APP_DIR }}/"
+          rsync -az --delete \
+            --exclude ".git" \
+            --exclude ".github" \
+            -e "ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes -o IdentitiesOnly=yes" \
+            ./ "${{ secrets.DO_USER }}@${{ secrets.DO_HOST }}:${{ secrets.DO_APP_DIR }}/"
 
       - name: Render .env from GitHub Secrets
         env:
@@ -35,36 +50,37 @@ jobs:
           SERVER_NAME: ${{ secrets.SERVER_NAME }}
           SECRET_KEY:  ${{ secrets.SECRET_KEY }}
         run: |
-          ssh ${{ secrets.DO_USER }}@${{ secrets.DO_HOST }} 'bash -s' <<'EOSSH'
-          set -euo pipefail
-          cd "${{ secrets.DO_APP_DIR }}"
-          cat > .env <<ENV
-          FLASK_ENV=production
-          APP_NAME=PulseWatch
-          ADMIN_EMAIL=${ADMIN_EMAIL}
-          SERVER_NAME=${SERVER_NAME}
-          PREFERRED_URL_SCHEME=https
-          SECRET_KEY=${SECRET_KEY}
-          ENV
-          EOSSH
+          ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes "${{ secrets.DO_USER }}@${{ secrets.DO_HOST }}" bash -lc "
+            set -euo pipefail
+            cd '${{ secrets.DO_APP_DIR }}'
+            cat > .env <<'ENV'
+            FLASK_ENV=production
+            APP_NAME=PulseWatch
+            ADMIN_EMAIL=${ADMIN_EMAIL}
+            SERVER_NAME=${SERVER_NAME}
+            PREFERRED_URL_SCHEME=https
+            SECRET_KEY=${SECRET_KEY}
+            ENV
+          "
 
-      - name: Compose up
+      - name: Compose up (build & start)
         run: |
-          ssh ${{ secrets.DO_USER }}@${{ secrets.DO_HOST }} 'bash -s' <<'EOSSH'
-          set -euo pipefail
-          cd "${{ secrets.DO_APP_DIR }}"
-          docker compose down --remove-orphans
-          docker compose up -d --build
-          docker compose ps
-          EOSSH
+          ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes "${{ secrets.DO_USER }}@${{ secrets.DO_HOST }}" bash -lc "
+            set -euo pipefail
+            cd '${{ secrets.DO_APP_DIR }}'
+            docker compose down --remove-orphans
+            docker compose up -d --build
+            docker compose ps
+          "
 
       - name: Smoke tests
         run: |
-          ssh ${{ secrets.DO_USER }}@${{ secrets.DO_HOST }} 'bash -s' <<'EOSSH'
-          set -euo pipefail
-          cd "${{ secrets.DO_APP_DIR }}"
-          docker compose exec -T nginx nginx -t || (docker compose logs --no-color nginx; exit 1)
-          docker compose exec -T nginx nginx -s reload || true
-          curl -fsS -o /dev/null http://127.0.0.1:8000/ || (docker compose logs --no-color web; exit 1)
-          curl -fsS -o /dev/null https://pulsewatch.pro/health || (docker compose logs --no-color nginx; exit 1)
-          EOSSH
+          ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes "${{ secrets.DO_USER }}@${{ secrets.DO_HOST }}" bash -lc "
+            set -euo pipefail
+            cd '${{ secrets.DO_APP_DIR }}'
+            docker compose exec -T nginx nginx -t
+            docker compose exec -T nginx nginx -s reload || true
+            curl -fsS -o /dev/null http://127.0.0.1:8000/
+            curl -fsS -o /dev/null https://pulsewatch.pro/health
+          "
+
