@@ -21,14 +21,14 @@ jobs:
       - name: Install rsync
         run: sudo apt-get update && sudo apt-get install -y rsync
 
-      - name: Write SSH key & known_hosts
+      - name: "Write SSH key & known_hosts"
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.DO_SSH_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "${{ secrets.DO_HOST }}" >> ~/.ssh/known_hosts
 
-      - name: DEBUG: key works & SSH connectivity
+      - name: "DEBUG: key works & SSH connectivity"
         run: |
           ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes -o IdentitiesOnly=yes "${{ secrets.DO_USER }}@${{ secrets.DO_HOST }}" 'echo connected'
 
@@ -63,7 +63,7 @@ jobs:
             ENV
           "
 
-      - name: Compose up (build & start)
+      - name: "Compose up (build & start)"
         run: |
           ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes "${{ secrets.DO_USER }}@${{ secrets.DO_HOST }}" bash -lc "
             set -euo pipefail
@@ -83,4 +83,3 @@ jobs:
             curl -fsS -o /dev/null http://127.0.0.1:8000/
             curl -fsS -o /dev/null https://pulsewatch.pro/health
           "
-
